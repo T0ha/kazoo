@@ -95,6 +95,12 @@
                     ,{{'acdc_queue_handler', 'handle_sync_req'}
                      ,[{<<"queue">>, <<"sync_req">>}]
                      }
+                    ,{{'acdc_queue_handler', 'handle_member_callback_reg'}
+                     ,[{<<"member">>, <<"callback_reg">>}]
+                     }
+                    ,{{'acdc_queue_handler', 'handle_member_callback_accepted'}
+                     ,[{<<"member">>, <<"callback_accepted">>}]
+                     }
                     ]).
 
 %%%=============================================================================
@@ -254,15 +260,31 @@ handle_cast({'member_connect_req', MemberCallJObj, Delivery, _Url}
            ,#state{my_q=MyQ
                   ,my_id=MyId
                   ,account_id=AccountId
+                  ,mgr_pid=MgrPid
                   ,queue_id=QueueId
                   }=State) ->
     Call = kapps_call:from_json(kz_json:get_value(<<"Call">>, MemberCallJObj)),
+    CallId = kapps_call:call_id(Call),
 
-    kz_log:put_callid(kapps_call:call_id(Call)),
+    kz_log:put_callid(CallId),
 
-    acdc_util:bind_to_call_events(Call),
-    lager:debug("bound to call events for ~s", [kapps_call:call_id(Call)]),
+    %% If a callback is registered before queue_fsm gets the call,
+    %% do not bind to events (as we don't care about hangups)
+    case acdc_queue_manager:callback_details(MgrPid, CallId) of
+        'undefined' ->
+            acdc_util:bind_to_call_events(Call),
+            lager:debug("bound to call events for ~s", [CallId]);
+        _ ->
+            'ok'
+    end,
     send_member_connect_req(kapps_call:call_id(Call), AccountId, QueueId, MyQ, MyId),
+
+    %% Be ready in case a callback or cancel comes in while queue_listener is handling call
+    gen_listener:add_binding(self(), 'acdc_queue', [{'restrict_to', ['member_callback_reg', 'member_call_result']}
+                                                   ,{'account_id', AccountId}
+                                                   ,{'queue_id', QueueId}
+                                                   ,{'callid', CallId}
+                                                   ]),
 
     {'noreply', State#state{call=Call
                            ,delivery=Delivery
@@ -284,8 +306,12 @@ handle_cast({'member_connect_win', RespJObj, QueueOpts}, #state{my_q=MyQ
                                                                }=State) ->
     lager:debug("agent process won the call, sending the win"),
 
-    send_member_connect_win(RespJObj, Call, QueueId, MyQ, MyId, QueueOpts),
-    {'noreply', State#state{agent_id=kz_json:get_value(<<"Agent-ID">>, RespJObj)}, 'hibernate'};
+    Call1 = apply_callback_details(Call, QueueOpts),
+
+    send_member_connect_win(RespJObj, Call1, QueueId, MyQ, MyId, QueueOpts),
+    {'noreply', State#state{call=Call1
+                           ,agent_id=kz_json:get_value(<<"Agent-ID">>, RespJObj)
+                           }, 'hibernate'};
 handle_cast({'member_connect_satisfied', RespJObj, QueueOpts}, #state{my_q=MyQ
                                                                      ,my_id=MyId
                                                                      ,call=Call
@@ -601,6 +627,16 @@ publish_sync_resp(Strategy, StrategyState, ReqJObj, Id) ->
              ]),
     publish(kz_json:get_value(<<"Server-ID">>, ReqJObj), Resp, fun kapi_acdc_queue:publish_sync_resp/2).
 
+-spec apply_callback_details(kapps_call:call(), kz_types:kz_proplist()) ->
+                                    kapps_call:call().
+apply_callback_details(Call, Props) ->
+    case props:get_value(<<"Callback-Details">>, Props) of
+        'undefined' -> Call;
+        CallbackDetails ->
+            CIDPrepend = kz_json:get_value(<<"Prepend-CID">>, CallbackDetails),
+            kapps_call:kvs_store('prepend_cid_name', CIDPrepend, Call)
+    end.
+
 -spec maybe_nack(kapps_call:call(), gen_listener:basic_deliver(), pid()) -> boolean().
 maybe_nack(Call, Delivery, SharedPid) ->
     case is_call_alive(Call) of
@@ -630,10 +666,22 @@ is_call_alive(Call) ->
     end.
 
 -spec clear_call_state(state()) -> state().
-clear_call_state(#state{account_id=AccountId
+clear_call_state(#state{call=Call,
+                        account_id=AccountId
                        ,queue_id=QueueId
                        }=State) ->
     _ = acdc_util:queue_presence_update(AccountId, QueueId),
+
+    case Call of
+        'undefined' -> 'ok';
+        _ ->
+            CallId = kapps_call:call_id(Call),
+            gen_listener:rm_binding(self(), 'acdc_queue', [{'restrict_to', ['member_callback_reg', 'member_call_result']}
+                                                          ,{'account_id', AccountId}
+                                                          ,{'queue_id', QueueId}
+                                                          ,{'callid', CallId}
+                                                          ])
+    end,
 
     kz_log:put_callid(QueueId),
     State#state{call='undefined'

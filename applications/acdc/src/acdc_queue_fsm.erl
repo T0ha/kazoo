@@ -20,6 +20,7 @@
 -export([member_call/3
         ,member_connect_resp/2
         ,member_accepted/2
+        ,member_callback_accepted/2
         ,member_connect_retry/2
         ,call_event/4
         ,refresh/2
@@ -29,6 +30,8 @@
 
          %% Accessors
         ,cdr_url/1
+
+        ,register_callback/2
         ]).
 
 %% State handlers
@@ -75,6 +78,7 @@
 
                ,member_call :: kapps_call:call() | 'undefined'
                ,member_call_start :: kz_time:start_time() | 'undefined'
+               ,member_call_winner :: kz_term:api_object() %% who won the call
                ,member_call_winners :: [kz_term:api_object()] %% who won the call
 
                                        %% Config options
@@ -92,8 +96,11 @@
                ,record_caller = 'false' :: boolean() % record the caller
                ,recording_url :: kz_term:api_binary() %% URL of where to POST recordings
                ,cdr_url :: kz_term:api_binary() % optional URL to request for extra CDR data
+               ,strategy :: kz_term:api_binary() % queue strategy
 
                ,notifications :: kz_term:api_object()
+
+               ,callback_details :: {kz_term:ne_binary(), kz_term:ne_binary()} | 'undefined'
                }).
 -type state() :: #state{}.
 
@@ -145,6 +152,14 @@ member_accepted(ServerRef, AcceptJObj) ->
 %% @doc
 %% @end
 %%------------------------------------------------------------------------------
+-spec member_callback_accepted(pid(), kz_json:object()) -> 'ok'.
+member_callback_accepted(ServerRef, AcceptJObj) ->
+    gen_statem:cast(ServerRef, {'callback_accepted', AcceptJObj}).
+
+%%------------------------------------------------------------------------------
+%% @doc
+%% @end
+%%------------------------------------------------------------------------------
 -spec member_connect_retry(pid(), kz_json:object()) -> 'ok'.
 member_connect_retry(ServerRef, RetryJObj) ->
     gen_statem:cast(ServerRef, {'retry', RetryJObj}).
@@ -182,6 +197,10 @@ status(ServerRef) ->
 -spec cdr_url(pid()) -> kz_term:api_binary().
 cdr_url(ServerRef) ->
     gen_statem:call(ServerRef, 'cdr_url').
+
+-spec register_callback(pid(), kz_json:object()) -> 'ok'.
+register_callback(ServerRef, JObj) ->
+    gen_statem:cast(ServerRef, {'register_callback', JObj}).
 
 %%%=============================================================================
 %%% gen_statem callbacks
@@ -281,6 +300,9 @@ ready('cast', {'member_finished'}, State) ->
 ready('cast', {'dtmf_pressed', _DTMF}, State) ->
     lager:debug("DTMF(~s) for old call", [_DTMF]),
     {'next_state', 'ready', State};
+ready('cast', {'register_callback', JObj}, State) ->
+    lager:debug("unexpected register_callback for ~s in ready", [kz_json:get_value(<<"Call-ID">>, JObj)]),
+    {'next_state', 'ready', State};
 ready('cast', Event, State) ->
     handle_event(Event, ready, State);
 ready({'call', From}, 'status', #state{cdr_url=Url
@@ -378,6 +400,12 @@ connect_req('cast', {'dtmf_pressed', DTMF}, #state{caller_exit_key=DTMF
     acdc_queue_listener:exit_member_call(ListenerSrv),
     acdc_stats:call_abandoned(AccountId, QueueId, CallId, ?ABANDON_EXIT),
     {'next_state', 'ready', clear_member_call(State), 'hibernate'};
+
+connect_req('cast', {'register_callback', JObj}, #state{connection_timer_ref=ConnRef}=State) ->
+    lager:debug("register_callback recv'd for ~s during connect_req", [kz_json:get_value(<<"Call-ID">>, JObj)]),
+    %% disable queue timeout for callback
+    maybe_stop_timer(ConnRef),
+    {'next_state', 'connect_req', State#state{connection_timer_ref='undefined'}};
 
 connect_req('cast', Event, State) ->
     handle_event(Event, connect_req, State);
@@ -481,6 +509,20 @@ connecting('cast', {'accepted', AcceptJObj}, #state{listener_proc=ListenerSrv
             {'next_state', 'connecting', State}
     end;
 
+connecting('cast', {'callback_accepted', AcceptJObj}, #state{agent_ring_timer_ref=AgentRef
+                                                             ,member_call=Call
+                                                            }=State) ->
+    case accept_is_for_call(AcceptJObj, Call) of
+        'true' ->
+            lager:debug("recv acceptance from agent, agent is calling back member"),
+            CallId = kapps_call:call_id(Call),
+            webseq:evt(?WSD_ID, self(), CallId, <<"member call - agent callback acceptance">>),
+
+            %% Do not send timeout to the agent once they've picked up the
+            %% initiating call of the callback
+            maybe_stop_timer(AgentRef),
+            {'next_state', 'connecting', State#state{agent_ring_timer_ref='undefined'}}
+    end;
 connecting('cast', {'retry', RetryJObj}, #state{agent_ring_timer_ref=AgentRef
                                                ,collect_ref=CollectRef
                                                ,member_call_winners=[Winner|[]]
@@ -557,6 +599,23 @@ connecting('cast', {'dtmf_pressed', DTMF}, #state{caller_exit_key=DTMF
 connecting('cast', {'dtmf_pressed', _DTMF}, State) ->
     lager:debug("caller pressed ~s, ignoring", [_DTMF]),
     {'next_state', 'connecting', State};
+
+connecting('cast', {'register_callback', JObj}, #state{listener_proc=Srv
+                                                       ,connection_timer_ref=ConnRef
+                                                       ,agent_ring_timer_ref=AgentRef
+                                                       ,member_call_winner=Winner
+                                                      }=State) ->
+    lager:debug("register_callback recv'd for ~s while connecting", [kz_json:get_value(<<"Call-ID">>, JObj)]),
+    %% disable queue timeout for callback
+    maybe_stop_timer(ConnRef),
+    %% cancel agent ringing and do re_req
+    erlang:send(self(), {'timeout', 'undefined', ?COLLECT_RESP_MESSAGE}),
+    maybe_stop_timer(AgentRef),
+    acdc_queue_listener:timeout_agent(Srv, Winner),
+    {'next_state', 'connect_req', State#state{connection_timer_ref='undefined'
+                                             ,agent_ring_timer_ref='undefined'
+                                             ,member_call_winner='undefined'
+                                             }};
 
 connecting('cast', Event, State) ->
     handle_event(Event, connecting, State);
@@ -734,6 +793,7 @@ clear_member_call(#state{connection_timer_ref=ConnRef
                ,agent_ring_timer_ref='undefined'
                ,member_call_start='undefined'
                ,member_call_winners=[]
+               ,callback_details='undefined'
                }.
 
 update_properties(QueueJObj, State) ->
@@ -824,6 +884,7 @@ maybe_delay_connect_req(Call, CallJObj, Delivery, #state{listener_proc=ListenerS
 maybe_connect_re_req(MgrSrv, ListenerSrv, #state{account_id=AccountId
                                                 ,queue_id=QueueId
                                                 ,member_call=Call
+                                                ,callback_details='undefined'
                                                 }=State) ->
     case acdc_queue_manager:are_agents_available(MgrSrv) of
         'true' ->
@@ -868,21 +929,68 @@ handle_agent_responses(#state{collect_ref=Ref
                              ,member_call=Call
                              ,account_id=AccountId
                              ,queue_id=QueueId
+                             ,strategy=S
                              }=State) ->
     maybe_stop_timer(Ref),
     case acdc_queue_manager:should_ignore_member_call(MgrSrv, Call, AccountId, QueueId) of
         'true' ->
             lager:debug("queue mgr said to ignore this call: ~s, not connecting to agents", [kapps_call:call_id(Call)]),
             acdc_queue_listener:finish_member_call(ListenerSrv),
-            {'ready', State};
+            {'ready', clear_member_call(State)};
         'false' ->
             lager:debug("done waiting for agents to respond, picking a winner"),
-            maybe_pick_winner(State)
+            CallbackDetails = acdc_queue_manager:callback_details(MgrSrv, kapps_call:call_id(Call)),
+            maybe_pick_winner(S, State#state{callback_details=CallbackDetails})
     end.
 
--spec maybe_pick_winner(state()) -> {atom(), state()}.
-maybe_pick_winner(#state{connect_resps=CRs
-                        ,listener_proc=ListenerSrv
+-spec maybe_pick_winner(kz_term:ne_binary(), state()) -> {atom(), state()}.
+maybe_pick_winner(<<"ring_all">>=S, #state{connect_resps=CRs
+                        ,listener_proc=Srv
+                        ,manager_proc=Mgr
+                        ,member_call=Call
+                        ,agent_ring_timeout=RingTimeout
+                        ,agent_wrapup_time=AgentWrapup
+                        ,caller_exit_key=CallerExitKey
+                        ,cdr_url=CDRUrl
+                        ,record_caller=ShouldRecord
+                        ,recording_url=RecordUrl
+                        ,notifications=Notifications
+                        }=State) ->
+   lager:debug("picking a winner in ring_all, we are all winners!"),
+   case acdc_queue_manager:pick_winner(Mgr, Call, CRs) of
+      {Winners, Rest} ->
+         QueueOpts = [{<<"Ring-Timeout">>, RingTimeout}
+                        ,{<<"Wrapup-Timeout">>, AgentWrapup}
+                        ,{<<"Caller-Exit-Key">>, CallerExitKey}
+                        ,{<<"CDR-Url">>, CDRUrl}
+                        ,{<<"Record-Caller">>, ShouldRecord}
+                        ,{<<"Recording-URL">>, RecordUrl}
+                        ,{<<"Notifications">>, Notifications}
+                        ,{<<"Callback-Details">>, callback_details(State)}
+                        ],
+          ConnectWins = lists:foldl(fun(Winner, Wins) ->
+                                            lager:debug("sending win to ~s(~s)", [kz_json:get_value(<<"Agent-ID">>, Winner)
+                                                                                 ,kz_json:get_value(<<"Process-ID">>, Winner)
+                                                                                 ]),
+                                            acdc_queue_listener:member_connect_win(Srv, update_agent(Winner, Winner), props:filter_undefined(QueueOpts)),
+                                            [Winner|Wins] end,
+                                    [], Winners),
+          {'connecting', State#state{connect_resps=Rest
+                                   ,connect_wins=ConnectWins
+                                   ,collect_ref='undefined'
+                                   ,agent_ring_timer_ref=start_agent_ring_timer(RingTimeout)
+                                   ,member_call_winners=Winners
+                                   ,strategy=S
+                                   }};
+
+		'undefined' ->
+            lager:info("no response from queue manager"),
+            {_, NextState, State1} = maybe_connect_re_req(Mgr, Srv, State#state{connect_resps=[]}),
+            {NextState, State1}
+   end;
+
+maybe_pick_winner(_Strategy, #state{connect_resps=CRs
+                        ,listener_proc=Srv
                         ,manager_proc=Mgr
                         ,member_call=Call
                         ,agent_ring_timeout=RingTimeout
@@ -894,7 +1002,7 @@ maybe_pick_winner(#state{connect_resps=CRs
                         ,notifications=Notifications
                         }=State) ->
     case acdc_queue_manager:pick_winner(Mgr, Call, CRs) of
-        {Winners, Rest} ->
+        {[Winner|_], _} ->
             QueueOpts = [{<<"Ring-Timeout">>, RingTimeout}
                         ,{<<"Wrapup-Timeout">>, AgentWrapup}
                         ,{<<"Caller-Exit-Key">>, CallerExitKey}
@@ -902,28 +1010,22 @@ maybe_pick_winner(#state{connect_resps=CRs
                         ,{<<"Record-Caller">>, ShouldRecord}
                         ,{<<"Recording-URL">>, RecordUrl}
                         ,{<<"Notifications">>, Notifications}
+                        ,{<<"Callback-Details">>, callback_details(State)}
                         ],
+            acdc_queue_listener:member_connect_win(Srv, update_agent(Winner, Winner), props:filter_undefined(QueueOpts)),
 
-            ConnectWins = lists:foldl(fun(Winner, Wins) ->
-                                              NewAgent = update_agent(Winner, Winners),
-                                              lager:debug("sending win to ~s(~s)", [kz_json:get_value(<<"Agent-ID">>, Winner)
-                                                                                   ,kz_json:get_value(<<"Process-ID">>, Winner)
-                                                                                   ]),
-                                              acdc_queue_listener:member_connect_win(ListenerSrv, NewAgent, QueueOpts),
-                                              [NewAgent|Wins] end,
-                                      [], Winners),
-
-            {'connecting', State#state{connect_resps=Rest
-                                      ,connect_wins=ConnectWins
+            lager:debug("sending win to ~s(~s)", [kz_json:get_value(<<"Agent-ID">>, Winner)
+                                                 ,kz_json:get_value(<<"Process-ID">>, Winner)
+                                                 ]),
+            {'connecting', State#state{connect_resps=[]
                                       ,collect_ref='undefined'
                                       ,agent_ring_timer_ref=start_agent_ring_timer(RingTimeout)
-                                      ,member_call_winners=Winners
+                                      ,member_call_winner=Winner
                                       }};
-        'undefined' ->
-            lager:debug("no more responses to choose from"),
-
-            acdc_queue_listener:cancel_member_call(ListenerSrv),
-            {'ready', clear_member_call(State)}
+        {[], []} ->
+            lager:info("no response from the winner"),
+            {_, NextState, State1} = maybe_connect_re_req(Mgr, Srv, State#state{connect_resps=[]}),
+            {NextState, State1}
     end.
 
 -spec have_agents_responded(kz_json:objects(), kz_term:ne_binaries()) -> boolean().
@@ -933,3 +1035,10 @@ have_agents_responded(Resps, Agents) ->
 -spec filter_agents(kz_json:object(), kz_term:ne_binaries()) -> kz_term:ne_binaries().
 filter_agents(Resp, AgentsAcc) ->
     lists:delete(kz_json:get_value(<<"Agent-ID">>, Resp), AgentsAcc).
+
+-spec callback_details(state()) -> kz_term:api_object().
+callback_details(#state{callback_details='undefined'}) -> 'undefined';
+callback_details(#state{callback_details={Number, CIDPrepend}}) ->
+    kz_json:from_list([{<<"Callback-Number">>, Number}
+                      ,{<<"Prepend-CID">>, CIDPrepend}
+                      ]).

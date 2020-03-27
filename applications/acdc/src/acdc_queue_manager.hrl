@@ -37,8 +37,7 @@
                ,announcements_config = [] :: kz_term:proplist()
                ,announcements_pids = #{} :: announcements_pids()
 
-               % TODO: for callbacks
-               % ,registered_callbacks = [] :: list()
+                ,registered_callbacks = [] :: list()
                }).
 -type mgr_state() :: #state{}.
 

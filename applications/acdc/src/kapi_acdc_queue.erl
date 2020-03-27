@@ -25,12 +25,14 @@
         ,agent_timeout/1, agent_timeout_v/1
         ,member_connect_retry/1, member_connect_retry_v/1
         ,member_connect_accepted/1, member_connect_accepted_v/1
+        ,member_callback_accepted/1, member_callback_accepted_v/1
         ,member_hungup/1, member_hungup_v/1
         ,sync_req/1, sync_req_v/1
         ,sync_resp/1, sync_resp_v/1
         ,agent_change/1, agent_change_v/1
         ,queue_member_add/1, queue_member_add_v/1
         ,queue_member_remove/1, queue_member_remove_v/1
+        ,member_callback_reg/1, member_callback_reg_v/1
         ]).
 
 -export([agent_change_available/0
@@ -56,12 +58,14 @@
         ,publish_agent_timeout/2, publish_agent_timeout/3
         ,publish_member_connect_retry/2, publish_member_connect_retry/3
         ,publish_member_connect_accepted/2, publish_member_connect_accepted/3
+        ,publish_member_callback_accepted/2, publish_member_callback_accepted/3
         ,publish_member_hungup/2, publish_member_hungup/3
         ,publish_sync_req/1, publish_sync_req/2
         ,publish_sync_resp/2, publish_sync_resp/3
         ,publish_agent_change/1, publish_agent_change/2
         ,publish_queue_member_add/1, publish_queue_member_add/2
         ,publish_queue_member_remove/1, publish_queue_member_remove/2
+        ,publish_member_callback_reg/1, publish_member_callback_reg/2
         ]).
 
 -export([queue_size/2, shared_queue_name/2]).
@@ -72,12 +76,14 @@
 %% Member Call
 %%------------------------------------------------------------------------------
 -define(MEMBER_CALL_HEADERS, [<<"Account-ID">>, <<"Queue-ID">>, <<"Call">>]).
--define(OPTIONAL_MEMBER_CALL_HEADERS, [<<"Member-Priority">>]).
+-define(OPTIONAL_MEMBER_CALL_HEADERS, [<<"Callback-Number">>, <<"Enter-As-Callback">>, <<"Member-Priority">>]).
 -define(MEMBER_CALL_VALUES, [{<<"Event-Category">>, <<"member">>}
                             ,{<<"Event-Name">>, <<"call">>}
                             ]).
 -define(MEMBER_CALL_TYPES, [{<<"Queue-ID">>, fun erlang:is_binary/1}
                            ,{<<"Member-Priority">>, fun is_integer/1}
+                           ,{<<"Callback-Number">>, fun is_binary/1}
+                           ,{<<"Enter-As-Callback">>, fun is_boolean/1}
                            ]).
 
 -spec member_call(kz_term:api_terms()) ->
@@ -286,7 +292,7 @@ member_connect_resp_v(JObj) ->
                                              ,<<"Wrapup-Timeout">>, <<"CDR-Url">>
                                              ,<<"Process-ID">>, <<"Agent-Process-IDs">>
                                              ,<<"Record-Caller">>, <<"Recording-URL">>
-                                             ,<<"Notifications">>
+                                             ,<<"Notifications">>, <<"Callback-Details">>
                                              ]).
 -define(MEMBER_CONNECT_WIN_VALUES, [{<<"Event-Category">>, <<"member">>}
                                    ,{<<"Event-Name">>, <<"connect_win">>}
@@ -390,6 +396,33 @@ member_connect_accepted_v(Prop) when is_list(Prop) ->
     kz_api:validate(Prop, ?MEMBER_CONNECT_ACCEPTED_HEADERS, ?MEMBER_CONNECT_ACCEPTED_VALUES, ?MEMBER_CONNECT_ACCEPTED_TYPES);
 member_connect_accepted_v(JObj) ->
     member_connect_accepted_v(kz_json:to_proplist(JObj)).
+
+%%------------------------------------------------------------------------------
+%% Member Call Back Accepted
+%%------------------------------------------------------------------------------
+-define(MEMBER_CALLBACK_ACCEPTED_HEADERS, [<<"Call-ID">>]).
+-define(OPTIONAL_MEMBER_CALLBACK_ACCEPTED_HEADERS, []).
+-define(MEMBER_CALLBACK_ACCEPTED_VALUES, [{<<"Event-Category">>, <<"member">>}
+                                         ,{<<"Event-Name">>, <<"callback_accepted">>}
+                                         ]).
+-define(MEMBER_CALLBACK_ACCEPTED_TYPES, []).
+
+-spec member_callback_accepted(kz_term:api_terms()) ->
+                                      {'ok', iolist()} |
+                                      {'error', string()}.
+member_callback_accepted(Props) when is_list(Props) ->
+    case member_callback_accepted_v(Props) of
+        'true' -> kz_api:build_message(Props, ?MEMBER_CALLBACK_ACCEPTED_HEADERS, ?OPTIONAL_MEMBER_CALLBACK_ACCEPTED_HEADERS);
+        'false' -> {'error', "Proplist failed validation for member_callback_accepted"}
+    end;
+member_callback_accepted(JObj) ->
+    member_callback_accepted(kz_json:to_proplist(JObj)).
+
+-spec member_callback_accepted_v(kz_term:api_terms()) -> boolean().
+member_callback_accepted_v(Prop) when is_list(Prop) ->
+    kz_api:validate(Prop, ?MEMBER_CALLBACK_ACCEPTED_HEADERS, ?MEMBER_CALLBACK_ACCEPTED_VALUES, ?MEMBER_CALLBACK_ACCEPTED_TYPES);
+member_callback_accepted_v(JObj) ->
+    member_callback_accepted_v(kz_json:to_proplist(JObj)).
 
 %%------------------------------------------------------------------------------
 %% Member Connect Retry
@@ -601,12 +634,15 @@ queue_member_routing_key(JObj) ->
 queue_member_routing_key(AcctId, QID) ->
     <<"acdc.queue.position.", AcctId/binary, ".", QID/binary>>.
 
--define(QUEUE_MEMBER_ADD_HEADERS, [<<"Account-ID">>, <<"Queue-ID">>, <<"Call">>]).
--define(OPTIONAL_QUEUE_MEMBER_ADD_HEADERS, []).
+-define(QUEUE_MEMBER_ADD_HEADERS, [<<"Account-ID">>, <<"Queue-ID">>, <<"Call">>, <<"Enter-As-Callback">>]).
+-define(OPTIONAL_QUEUE_MEMBER_ADD_HEADERS, [<<"Callback-Number">>]).
 -define(QUEUE_MEMBER_ADD_VALUES, [{<<"Event-Category">>, <<"queue">>}
                                  ,{<<"Event-Name">>, <<"member_add">>}
                                  ]).
--define(QUEUE_MEMBER_ADD_TYPES, []).
+-define(QUEUE_MEMBER_ADD_TYPES, [{<<"Callback-Number">>, fun is_binary/1}
+                                ,{<<"Enter-As-Callback">>, fun is_boolean/1}
+                                ,{<<"Member-Priority">>, fun is_integer/1}
+                                ]).
 
 -spec queue_member_add(kz_term:api_terms()) ->
           {'ok', iolist()} |
@@ -644,6 +680,51 @@ queue_member_remove(JObj) -> queue_member_remove(kz_json:to_proplist(JObj)).
 queue_member_remove_v(Prop) when is_list(Prop) ->
     kz_api:validate(Prop, ?QUEUE_MEMBER_REMOVE_HEADERS, ?QUEUE_MEMBER_REMOVE_VALUES, ?QUEUE_MEMBER_REMOVE_TYPES);
 queue_member_remove_v(JObj) -> queue_member_remove_v(kz_json:to_proplist(JObj)).
+
+%%------------------------------------------------------------------------------
+%% Member Call Back - let the caller leave the queue but be called back
+%%  when their turn comes up
+%%------------------------------------------------------------------------------
+-spec member_callback_reg_routing_key(kz_term:api_terms()) -> kz_term:ne_binary().
+member_callback_reg_routing_key(Props) when is_list(Props) ->
+    AcctId = props:get_value(<<"Account-ID">>, Props),
+    QueueId = props:get_value(<<"Queue-ID">>, Props, <<"*">>),
+    CallId = props:get_value(<<"Call-ID">>, Props, <<"#">>),
+    member_callback_reg_routing_key(AcctId, QueueId, CallId);
+member_callback_reg_routing_key(JObj) ->
+    AcctId = kz_json:get_value(<<"Account-ID">>, JObj),
+    QueueId = kz_json:get_value(<<"Queue-ID">>, JObj, <<"*">>),
+    CallId = kz_json:get_value(<<"Call-ID">>, JObj, <<"#">>),
+    member_callback_reg_routing_key(AcctId, QueueId, CallId).
+
+-spec member_callback_reg_routing_key(kz_term:ne_binary(), kz_term:ne_binary(), kz_term:ne_binary()) -> kz_term:ne_binary().
+member_callback_reg_routing_key(AcctId, QueueId, CallId) ->
+    <<"acdc.member.callback_reg.", AcctId/binary, ".", QueueId/binary, ".", CallId/binary>>.
+
+-define(MEMBER_CALLBACK_HEADERS, [<<"Call-ID">>, <<"Account-ID">>, <<"Queue-ID">>, <<"Number">>]).
+-define(OPTIONAL_MEMBER_CALLBACK_HEADERS, []).
+-define(MEMBER_CALLBACK_VALUES, [{<<"Event-Category">>, <<"member">>}
+                                ,{<<"Event-Name">>, <<"callback_reg">>}
+                                ]).
+-define(MEMBER_CALLBACK_TYPES, []).
+
+-spec member_callback_reg(kz_term:api_terms()) ->
+                                 {'ok', iolist()} |
+                                 {'error', string()}.
+member_callback_reg(Props) when is_list(Props) ->
+    case member_callback_reg_v(Props) of
+        'true' -> kz_api:build_message(Props, ?MEMBER_CALLBACK_HEADERS, ?OPTIONAL_MEMBER_CALLBACK_HEADERS);
+        'false' -> {'error', "Proplist failed validation for member_callback_reg"}
+    end;
+member_callback_reg(JObj) ->
+    member_callback_reg(kz_json:to_proplist(JObj)).
+
+-spec member_callback_reg_v(kz_term:api_terms()) -> boolean().
+member_callback_reg_v(Prop) when is_list(Prop) ->
+    kz_api:validate(Prop, ?MEMBER_CALLBACK_HEADERS, ?MEMBER_CALLBACK_VALUES, ?MEMBER_CALLBACK_TYPES);
+member_callback_reg_v(JObj) ->
+    member_callback_reg_v(kz_json:to_proplist(JObj)).
+
 %% Bind/Unbind the queue as appropriate
 %%------------------------------------------------------------------------------
 -spec shared_queue_name(kz_term:ne_binary(), kz_term:ne_binary()) -> kz_term:ne_binary().
@@ -878,6 +959,15 @@ publish_member_connect_accepted(Q, API, ContentType) ->
     {'ok', Payload} = kz_api:prepare_api_payload(API, ?MEMBER_CONNECT_ACCEPTED_VALUES, fun member_connect_accepted/1),
     kz_amqp_util:targeted_publish(Q, Payload, ContentType).
 
+-spec publish_member_callback_accepted(kz_term:ne_binary(), kz_term:api_terms()) -> 'ok'.
+publish_member_callback_accepted(Q, JObj) ->
+    publish_member_callback_accepted(Q, JObj, ?DEFAULT_CONTENT_TYPE).
+
+-spec publish_member_callback_accepted(kz_term:ne_binary(), kz_term:api_terms(), kz_term:ne_binary()) -> 'ok'.
+publish_member_callback_accepted(Q, API, ContentType) ->
+    {'ok', Payload} = kz_api:prepare_api_payload(API, ?MEMBER_CALLBACK_ACCEPTED_VALUES, fun member_callback_accepted/1),
+    amqp_util:targeted_publish(Q, Payload, ContentType).
+
 -spec publish_member_connect_retry(kz_term:ne_binary(), kz_term:api_terms()) -> 'ok'.
 publish_member_connect_retry(Q, JObj) ->
     publish_member_connect_retry(Q, JObj, ?DEFAULT_CONTENT_TYPE).
@@ -940,3 +1030,12 @@ publish_queue_member_remove(JObj) ->
 publish_queue_member_remove(API, ContentType) ->
     {'ok', Payload} = kz_api:prepare_api_payload(API, ?QUEUE_MEMBER_REMOVE_VALUES, fun queue_member_remove/1),
     kz_amqp_util:kapps_publish(queue_member_routing_key(API), Payload, ContentType).
+
+-spec publish_member_callback_reg(kz_term:api_terms()) -> 'ok'.
+publish_member_callback_reg(JObj) ->
+    publish_member_callback_reg(JObj, ?DEFAULT_CONTENT_TYPE).
+
+-spec publish_member_callback_reg(kz_term:api_terms(), kz_term:ne_binary()) -> 'ok'.
+publish_member_callback_reg(API, ContentType) ->
+    {'ok', Payload} = kz_api:prepare_api_payload(API, ?MEMBER_CALLBACK_VALUES, fun member_callback_reg/1),
+    amqp_util:callmgr_publish(Payload, ContentType, member_callback_reg_routing_key(API)).
