@@ -47,12 +47,18 @@ handle(Data, Call) ->
     Skills = kz_json:get_list_value('acdc_required_skills', Data, []),
     Call1 = kapps_call:kvs_store('acdc_required_skills', Skills, Call),
 
+    IsCallback = kz_json:get_boolean_value(<<"acdc_enter_as_callback">>, Data, 'false'),
+    lager:debug("Data = ~p", [Data]),
+    lager:debug("IsCallback = ~p", [IsCallback]),
+
 
     MemberCall = props:filter_undefined(
                    [{<<"Account-ID">>, kapps_call:account_id(Call1)}
                    ,{<<"Queue-ID">>, QueueId}
                    ,{<<"Call">>, kapps_call:to_json(Call1)}
                    ,{<<"Member-Priority">>, Priority}
+                   ,{<<"Callback-Number">>, kapps_call:caller_id_number(Call1)}
+                   ,{<<"Enter-As-Callback">>, IsCallback}
                     | kz_api:default_headers(?APP_NAME, ?APP_VERSION)
                    ]),
 

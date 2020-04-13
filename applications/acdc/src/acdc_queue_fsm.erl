@@ -919,6 +919,7 @@ accept_is_for_call(AcceptJObj, Call) ->
 
 -spec update_agent(kz_json:object(), kz_json:objects()) -> kz_json:object().
 update_agent(Agent, Winners) ->
+    lager:info("update_agent: ~p ~p", [Agent, Winners]),
     AgentProcessIDs = [ProcessId || Winner <- Winners, ProcessId <- [kz_json:get_ne_binary_value(<<"Process-ID">>, Winner)], ProcessId =/= 'undefined'],
     kz_json:set_value(<<"Agent-Process-IDs">>, AgentProcessIDs, Agent).
 
@@ -1002,7 +1003,7 @@ maybe_pick_winner(_Strategy, #state{connect_resps=CRs
                         ,notifications=Notifications
                         }=State) ->
     case acdc_queue_manager:pick_winner(Mgr, Call, CRs) of
-        {[Winner|_], _} ->
+        {[Winner|_] = _Agents, _} ->
             QueueOpts = [{<<"Ring-Timeout">>, RingTimeout}
                         ,{<<"Wrapup-Timeout">>, AgentWrapup}
                         ,{<<"Caller-Exit-Key">>, CallerExitKey}
@@ -1012,7 +1013,7 @@ maybe_pick_winner(_Strategy, #state{connect_resps=CRs
                         ,{<<"Notifications">>, Notifications}
                         ,{<<"Callback-Details">>, callback_details(State)}
                         ],
-            acdc_queue_listener:member_connect_win(Srv, update_agent(Winner, Winner), props:filter_undefined(QueueOpts)),
+            acdc_queue_listener:member_connect_win(Srv, update_agent(Winner, [Winner]), props:filter_undefined(QueueOpts)),
 
             lager:debug("sending win to ~s(~s)", [kz_json:get_value(<<"Agent-ID">>, Winner)
                                                  ,kz_json:get_value(<<"Process-ID">>, Winner)

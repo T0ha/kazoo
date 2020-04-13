@@ -169,7 +169,7 @@ handle_member_call(JObj, Props) ->
                              ,{'reject_member_call', Call, JObj}
                              );
         'true' ->
-            start_queue_call(JObj, Props, Call)
+            start_queue_call(JObj, Props, Call, kz_json:is_true(<<"Enter-As-Callback">>, JObj))
     end.
 
 -spec are_agents_available(kz_types:server_ref()) -> boolean().
@@ -180,7 +180,7 @@ are_agents_available(Srv, EnterWhenEmpty) ->
     agents_available(Srv) > 0
         orelse EnterWhenEmpty.
 
-start_queue_call(JObj, Props, Call) ->
+start_queue_call(JObj, Props, Call, 'false') ->
     _ = kapps_call:put_callid(Call),
     QueueId = kz_json:get_value(<<"Queue-ID">>, JObj),
 
@@ -209,8 +209,21 @@ start_queue_call(JObj, Props, Call) ->
                               ,Call
                               ),
 
+
     %% Add member to queue for tracking position
-    gen_listener:cast(props:get_value('server', Props), {'add_queue_member', JObj2}).
+    gen_listener:cast(props:get_value('server', Props), {'add_queue_member', JObj2});
+start_queue_call(JObj, Props, Call, 'true') ->
+    _ = kapps_call:put_callid(Call),
+    QueueId = kz_json:get_value(<<"Queue-ID">>, JObj),
+
+    Call1 = kapps_call:set_custom_channel_var(<<"Queue-ID">>, QueueId, Call),
+
+    lager:info("member callback for queue ~s recv", [QueueId]),
+
+    JObj1 = kz_json:set_value(<<"Call">>, kapps_call:to_json(Call1), JObj),
+
+    %% Add member to queue for tracking position
+    gen_listener:cast(props:get_value('server', Props), {'add_queue_member', JObj1}).
 
 -spec handle_member_call_success(kz_json:object(), kz_term:proplist()) -> 'ok'.
 handle_member_call_success(JObj, Prop) ->
@@ -385,6 +398,7 @@ handle_call({'up_next', CallId}, _, #state{strategy=Strategy
                                           }=State) ->
     FreeAgents = ss_size(Strategy, SS, 'free'),
     Position = queue_member_position(CallId, Calls),
+    lager:info("FreeAgents: ~p, Position: ~p", [FreeAgents, Position]),
     {'reply', FreeAgents >= Position, State};
 
 handle_call('config', _, #state{account_id=AccountId
@@ -1631,14 +1645,15 @@ maybe_add_queue_member_as_callback(JObj, Call, #state{account_id=AccountId
 %%--------------------------------------------------------------------
 -spec callback_flag(kz_types:ne_binary(), kz_types:ne_binary(), kapps_call:call()) ->
                            kapps_call:call().
-callback_flag(AccountId, QueueId, Call) ->
+callback_flag(_AccountId, _QueueId, Call) ->
     Call1 = prepend_cid_name(<<"CB:">>, Call),
-    {_, CIDName} = acdc_util:caller_id(Call1),
-    acdc_stats:call_marked_callback(AccountId
-                                   ,QueueId
-                                   ,kapps_call:call_id(Call)
-                                   ,CIDName
-                                   ),
+    {_, _CIDName} = acdc_util:caller_id(Call1),
+    %TODO: stats stuff
+    %acdc_stats:call_marked_callback(AccountId
+    %                               ,QueueId
+    %                               ,kapps_call:call_id(Call)
+    %                               ,CIDName
+    %                               ),
     Call1.
 
 -spec prepend_cid_name(kz_types:ne_binary(), kapps_call:call()) -> kapps_call:call().

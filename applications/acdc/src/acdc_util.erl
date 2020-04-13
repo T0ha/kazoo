@@ -18,6 +18,7 @@
         ,agents_in_queue/2
         ,agent_devices/2
         ,proc_id/0, proc_id/1, proc_id/2
+        ,caller_id/1
         ,queue_presence_update/2
         ,agent_presence_update/2
         ,presence_update/3, presence_update/4
@@ -142,6 +143,14 @@ proc_id(Pid) -> proc_id(Pid, node()).
 
 -spec proc_id(pid(), atom() | kz_term:ne_binary()) -> kz_term:ne_binary().
 proc_id(Pid, Node) -> list_to_binary([kz_term:to_binary(Node), "-", pid_to_list(Pid)]).
+
+-spec caller_id(kapps_call:call()) -> {kz_term:api_binary(), kz_term:api_binary()}.
+caller_id(Call) ->
+    CallerIdType = case kapps_call:inception(Call) of
+                       'undefined' -> <<"internal">>;
+                       _Else -> <<"external">>
+                   end,
+    kz_attributes:caller_id(CallerIdType, Call).
 
 -spec hangup_cause(kz_json:object()) -> kz_term:ne_binary().
 hangup_cause(JObj) ->

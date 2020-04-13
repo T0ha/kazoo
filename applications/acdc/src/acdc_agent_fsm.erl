@@ -186,7 +186,7 @@ call_event(ServerRef, <<"call_event">>, <<"LEG_CREATED">>, JObj) ->
 call_event(ServerRef, <<"call_event">>, <<"LEG_DESTROYED">>, JObj) ->
     gen_statem:cast(ServerRef, {'leg_destroyed', call_id(JObj)});
 call_event(ServerRef, <<"call_event">>, <<"CHANNEL_ANSWER">>, JObj) ->
-    gen_statem:cast(ServerRef, {'channel_answered', call_id(JObj)});
+    gen_statem:cast(ServerRef, {'channel_answered', JObj});
 call_event(ServerRef, <<"call_event">>, <<"DTMF">>, EvtJObj) ->
     gen_statem:cast(ServerRef, {'dtmf_pressed', kz_json:get_value(<<"DTMF-Digit">>, EvtJObj)});
 call_event(ServerRef, <<"call_event">>, <<"CHANNEL_EXECUTE_COMPLETE">>, JObj) ->
@@ -659,7 +659,8 @@ ready('cast', {'originate_uuid', ACallId, ACtrlQ}, #state{agent_listener=AgentLi
     acdc_agent_listener:originate_uuid(AgentListener, ACallId, ACtrlQ),
     acdc_agent_listener:channel_hungup(AgentListener, ACallId),
     {'next_state', 'ready', State};
-ready('cast', {'channel_answered', CallId}, #state{outbound_call_ids=OutboundCallIds}=State) ->
+ready('cast', {'channel_answered', JObj}, #state{outbound_call_ids=OutboundCallIds}=State) ->
+    CallId = call_id(JObj),
     case lists:member(CallId, OutboundCallIds) of
         'true' ->
             lager:debug("agent picked up outbound call ~s", [CallId]),
@@ -853,10 +854,7 @@ ringing('cast', {'dtmf_pressed', DTMF}, #state{caller_exit_key=DTMF
 ringing('cast', {'dtmf_pressed', DTMF}, #state{caller_exit_key=_ExitKey}=State) ->
     lager:debug("caller pressed ~s, exit key is ~s", [DTMF, _ExitKey]),
     {'next_state', 'ringing', State};
-ringing('cast', {'channel_answered', MemberCallId}, #state{member_call_id=MemberCallId}=State) ->
-    lager:debug("caller's channel answered"),
-    {'next_state', 'ringing', State};
-ringing('cast', {'channel_answered', OtherCallId}, #state{account_id=AccountId
+ringing('cast', {'channel_answered', JObj}, #state{account_id=AccountId
                                                          ,agent_id=AgentId
                                                          ,member_call=MemberCall
                                                          ,member_call_id=MemberCallId
@@ -864,24 +862,30 @@ ringing('cast', {'channel_answered', OtherCallId}, #state{account_id=AccountId
                                                          ,outbound_call_ids=OutboundCallIds
                                                          ,member_call_queue_id=QueueId
                                                          }=State) ->
-    case lists:member(OtherCallId, OutboundCallIds) of
-        'true' ->
-            lager:debug("agent picked up outbound call ~s instead of the queue call ~s", [OtherCallId, MemberCallId]),
-            acdc_agent_listener:hangup_call(AgentListener),
-            {'next_state', 'outbound', start_outbound_call_handling(OtherCallId, clear_call(State, 'ready')), 'hibernate'};
-        'false' ->
-            lager:debug("recv answer for ~s, probably the agent's call", [OtherCallId]),
+    case call_id(JObj) of
+        MemberCallId ->
+            lager:debug("caller's channel answered"),
+            {'next_state', 'ringing', State};
+        OtherCallId ->
+            case lists:member(OtherCallId, OutboundCallIds) of
+                'true' ->
+                    lager:debug("agent picked up outbound call ~s instead of the queue call ~s", [OtherCallId, MemberCallId]),
+                    acdc_agent_listener:hangup_call(AgentListener),
+                    {'next_state', 'outbound', start_outbound_call_handling(OtherCallId, clear_call(State, 'ready')), 'hibernate'};
+                'false' ->
+                    lager:debug("recv answer for ~s, probably the agent's call", [OtherCallId]),
 
-            CIDName = kapps_call:caller_id_name(MemberCall),
-            CIDNum = kapps_call:caller_id_number(MemberCall),
+                    CIDName = kapps_call:caller_id_name(MemberCall),
+                    CIDNum = kapps_call:caller_id_number(MemberCall),
 
-            acdc_agent_stats:agent_connected(AccountId, AgentId, MemberCallId, CIDName, CIDNum, QueueId),
+                    acdc_agent_stats:agent_connected(AccountId, AgentId, MemberCallId, CIDName, CIDNum, QueueId),
 
-            acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_RED_SOLID),
+                    acdc_agent_listener:presence_update(AgentListener, ?PRESENCE_RED_SOLID),
 
-            {'next_state', 'answered', State#state{agent_call_id=OtherCallId
-                                                  ,connect_failures=0
-                                                  }}
+                    {'next_state', 'answered', State#state{agent_call_id=OtherCallId
+                                                           ,connect_failures=0
+                                                          }}
+            end
     end;
 ringing('cast', {'sync_req', JObj}, #state{agent_listener=AgentListener}=State) ->
     lager:debug("recv sync_req from ~s", [kz_json:get_value(<<"Process-ID">>, JObj)]),
@@ -1163,7 +1167,7 @@ ringing_callback({'call', From}, 'current_call', #state{member_call=Call
                                                        }) ->
     {'keep_state_and_data', {'reply', From, current_call(Call, 'ringing_callback', QueueId, 'undefined')}};
 ringing_callback(_EvtType, _Evt, State) ->
-    lager:debug("unhandled event ~p: ~p", [_EvtType, _Evt]),
+    lager:debug("unhandled event ~p: ~p State = ~p", [_EvtType, _Evt, State]),
     {'next_state', 'ringing_callback', State}.
 
 %%--------------------------------------------------------------------
@@ -1431,20 +1435,26 @@ answered('cast', {'channel_unbridged', CallId}, #state{member_call_id=CallId}=St
 answered('cast', {'channel_unbridged', CallId}, #state{agent_call_id=CallId}=State) ->
     lager:info("agent channel unbridged"),
     {'next_state', 'answered', State};
-answered('cast', {'channel_answered', MemberCallId}, #state{member_call_id=MemberCallId}=State) ->
-    lager:debug("member's channel has answered"),
-    {'next_state', 'answered', State};
-answered('cast', {'channel_answered', AgentCallId}, #state{agent_call_id=AgentCallId}=State) ->
-    lager:debug("agent's channel ~s has answered", [AgentCallId]),
-    {'next_state', 'answered', State};
-answered('cast', {'channel_answered', OtherCallId}=Evt, #state{outbound_call_ids=OutboundCallIds}=State) ->
-    case lists:member(OtherCallId, OutboundCallIds) of
-        'true' ->
-            lager:debug("agent answered outbound call ~s", [OtherCallId]),
+answered('cast', {'channel_answered', JObj}=Evt, #state{agent_call_id=AgentCallId
+                                                   ,member_call_id=MemberCallId
+                                                   ,outbound_call_ids=OutboundCallIds
+                                                   }=State) ->
+    case call_id(JObj) of
+        MemberCallId ->
+            lager:debug("member's channel has answered"),
             {'next_state', 'answered', State};
-        'false' ->
-            lager:debug("unexpected event while answered: ~p", [Evt]),
-            {'next_state', 'answered', State}
+        AgentCallId ->
+            lager:debug("agent's channel ~s has answered", [AgentCallId]),
+            {'next_state', 'answered', State};
+        OtherCallId ->
+            case lists:member(OtherCallId, OutboundCallIds) of
+                'true' ->
+                    lager:debug("agent answered outbound call ~s", [OtherCallId]),
+                    {'next_state', 'answered', State};
+                'false' ->
+                    lager:debug("unexpected event while answered: ~p", [Evt]),
+                    {'next_state', 'answered', State}
+            end
     end;
 answered('cast', {'originate_started', _CallId}, State) ->
     {'next_state', 'answered', State};
